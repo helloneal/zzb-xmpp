@@ -25,21 +25,19 @@ class XUser(cfgUser: String, setting: XUserSetting)(implicit bus: XmppEventBus) 
 
   bus.subscribe(self, s"/xuser/$cfgUser/chat-to")
 
-  var doReconnect = true
-
   private def conn = stateData.conn
 
   //注册连接监听器
   conn.addConnectionListener(new ConnectionListener {
     override def connected(connection: XMPPConnection): Unit = {
-      log.debug(s"<$cfgUser> connection listener got connected")
+      log.info(s"<$cfgUser> connection listener got connected")
       self ! Connected(cfgUser)
     }
 
     override def reconnectionFailed(e: Exception): Unit = ()
 
     override def reconnectionSuccessful(): Unit = {
-      log.debug(s"<$cfgUser> connection listener got reconnection successful")
+      log.info(s"<$cfgUser> connection listener got reconnection successful")
       //重连成功时楼上的 connected 方法也会被回调，这里就不用再发Connected消息了
     }
 
@@ -58,7 +56,7 @@ class XUser(cfgUser: String, setting: XUserSetting)(implicit bus: XmppEventBus) 
       val jid = packet.getFrom
       val presence = packet.asInstanceOf[Presence]
       bus.publish(XStatus(s"/xuser/$cfgUser/status/friends/$jid", jid, if (presence.isAvailable) Online else Offline))
-      log.debug(s"<$cfgUser> presence listener got {} => {}", packet.getFrom, packet.toString)
+      log.info(s"<$cfgUser> presence listener got {} => {}", packet.getFrom, packet.toString)
     }
   }, NotConferencePresenceFilter)
 
@@ -91,8 +89,7 @@ class XUser(cfgUser: String, setting: XUserSetting)(implicit bus: XmppEventBus) 
 
   when(Offline) {
     case Event(DoLogin, _) =>
-      doReconnect = true
-      log.debug(s"XUser <$cfgUser> start connecting...")
+      log.info(s"XUser <$cfgUser> start connecting...")
       Future {
         conn.connect()
       }.onFailure {
@@ -106,13 +103,13 @@ class XUser(cfgUser: String, setting: XUserSetting)(implicit bus: XmppEventBus) 
       goto(Connecting)
 
     case Event(Authenticated, _) =>
-      log.debug(s"XUser <$cfgUser> login Ok!")
+      log.info(s"XUser <$cfgUser> login Ok!")
       goto(Online)
   }
 
   when(Connecting) {
     case Event(Connected(jid), _) =>
-      log.debug(s"XUser <$cfgUser> $jid Connected,start login...")
+      log.info(s"XUser <$cfgUser> $jid Connected,start login...")
       Future {
         conn.login(setting.username, setting.password, setting.resource)
       }.onFailure {
@@ -125,16 +122,17 @@ class XUser(cfgUser: String, setting: XUserSetting)(implicit bus: XmppEventBus) 
       goto(Offline)
 
     case Event(Authenticated, _) =>
-      log.debug(s"XUser <$cfgUser> login Ok!")
+      log.info(s"XUser <$cfgUser> login Ok!")
       goto(Online)
 
     case Event(DoLogout, _) =>
-      doReconnect = false
       goto(Offline)
+    case Event(DoLogin, _) =>
+      stay()
   }
   when(Online) {
     case Event(XMessageOut(_, to, body, subject, thread), ctx) =>
-      log.debug(s"XUser <$cfgUser> want to send msg to {},[{}]:{}", to, subject, body)
+      log.info(s"XUser <$cfgUser> want to send msg to {},[{}]:{}", to, subject, body)
       val chatId = if (thread != null && thread.length > 0) s"$to-$thread" else to
       val chat = ctx.chats.getOrElse(chatId, {
         val newChat = ChatManager.getInstanceFor(ctx.conn).createChat(to, thread, chatMessageListener)
@@ -169,7 +167,6 @@ class XUser(cfgUser: String, setting: XUserSetting)(implicit bus: XmppEventBus) 
         stay()
 
     case Event(DoLogout, _) =>
-      doReconnect = false
       conn.disconnect()
       goto(Offline)
   }
@@ -177,11 +174,8 @@ class XUser(cfgUser: String, setting: XUserSetting)(implicit bus: XmppEventBus) 
   when(Offline, Online, Connecting) {
     //只要掉线就重连
     case Event(ConnectionLost, _) =>
-      if (doReconnect) {
-        log.warning(s"XUser <$cfgUser> connect lost")
-        conn.connect()
-        goto(Connecting)
-      } else goto(Offline)
+      context.system.scheduler.scheduleOnce(10.seconds, self, DoLogin)
+      goto(Offline)
     case Event(LoginFailed(e), _) =>
       //登陆失败原因有多种多样，在登录失败的时候进行重新登陆
       context.system.scheduler.scheduleOnce(10.seconds, self, DoLogin)
@@ -196,7 +190,7 @@ class XUser(cfgUser: String, setting: XUserSetting)(implicit bus: XmppEventBus) 
 
   onTransition {
     case from -> to =>
-      log.debug(s"XUser <$cfgUser> status from 【{}】 to 【{}】", from, to)
+      log.info(s"XUser <$cfgUser> status from 【{}】 to 【{}】", from, to)
       bus.publish(XStatus(s"/xuser/$cfgUser/status/self", setting.username, to))
   }
 
